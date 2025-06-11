@@ -1,0 +1,204 @@
+---
+title: "Cell Phone Project"
+author: "Jimmy Lozano"
+output: html_document
+theme: "cerulean"
+highlight: "tango"
+---
+
+## Introduction
+In this project, I will compare multinomial, KNN, GBM, and Random Forest models on the Cell Phone dataset to predict cancellations. These models will be ranked by the logloss metric. It seems unnecessary to test for accuracy since there is no true test datase, meaning accuracy will be generally very high and not a useful metric of comparison. I was considering splitting the original dataset, but prefered not to since project 1 asked us not to. The final model will be chosen based off logloss then be applied to the test dataset to produce a predictions output. 
+
+
+
+## Libraries and Data Collection
+```{r, message=FALSE, warning=FALSE}
+rm(list=ls()) 
+library(rstudioapi)
+setwd(dirname(rstudioapi::getSourceEditorContext()$path))
+
+library(MLmetrics)
+library(randomForest)
+library(caret)
+library(dplyr)
+library(gbm)
+library(xgboost)
+maindir = getwd()
+data.dir = "/data/"       #data directory
+
+cell_train <- read.csv(paste(maindir,data.dir,"cell_plan_cancellations.csv",sep=""), 
+                      stringsAsFactors = TRUE) # read in data
+
+cell_test <- read.csv(paste(maindir,data.dir,"cell_plan_cancellations_test.csv",sep=""), 
+                      stringsAsFactors = TRUE) # read in data
+
+set.seed(203)  # Set seed for reproducibility
+#As mentioned, I decided not to go throught with this but still kept it in the script. 
+splitIndex <- createDataPartition(cell_train$Cancel, p = 0.8, list = FALSE) # 80/20 split
+train_data <- cell_train[splitIndex, ]  
+test_data <- cell_train[-splitIndex, ]  
+```
+
+## TrainControl object for KNN
+Using slightly different parameters from class. Will utilize same train control object for consistency among each training model. The logloss summaryFunction is added here to ensure we get the correct metric. 
+```{r}
+
+set.seed(318941)
+
+num_folds = 7
+num_repeats = 5
+train.control <- caret::trainControl(
+  method = "repeatedcv", 
+  number = num_folds,
+  repeats = num_repeats,
+  savePredictions = TRUE,
+  classProbs = TRUE, #added for classification
+  index = createMultiFolds(cell_train$Cancel, k=num_folds, times=num_repeats) ,
+  returnResamp = "all",
+  summaryFunction=mnLogLoss #adding this to calculate log-loss
+)
+
+```
+
+## Multinomial
+Shows a smaller logloss with categorical variables. Don't expect multinomial to be great, so I'm using this as a baseline just to get the analysis started.
+```{r}
+sink(tempfile()) #to supress output of these models
+multi_cat <- train(Cancel ~ .,data = cell_train, method = "multinom", trControl = train.control, tuneLength = 5, metric="logLoss",verbose = FALSE)
+multi_nocat <- train(Cancel ~. -Married-PaymentMethod-BasePlan-IntlPlan-Deal,data = cell_train, 
+                     method = "multinom", metric="logLoss", trControl = train.control, tuneLength = 5, verbose = FALSE)
+sink()
+
+print(paste("Log-loss with categorical: ",mean((multi_cat$resample$logLoss))))
+
+print(paste("Log-loss without categorical: ",mean((multi_nocat$resample$logLoss))))
+
+```
+
+## KNN
+The best tune for k is 21 and 25 depending on with/without categorical variables. That already lets me know that KNN isn't the best model for this dataset. Furthermore, the log-loss values are above .5, which is surprisingly much worse than the multinomial. 
+
+
+Note: I tried a KNN tuneGrid of 30 at first but noticed diminishing returns post ~ 25 I made the threshold 25 to have a more informative plot. 
+```{r}
+## ----------------------------------------------------------------------------------------------------------------------------------
+#knn with caret. make sure to include preProces
+knn.cv <- caret::train(Cancel ~ .-Married-PaymentMethod-BasePlan-IntlPlan-Deal, data = cell_train, method = "knn",
+                       trControl = train.control, preProcess = c("range"),
+                       metric="logLoss",
+                       tuneGrid = expand.grid(k = 1:25))
+
+plot(knn.cv$results$k,knn.cv$results$logLoss,xlab="k",  ylab="Validation Log-loss",
+     cex=2,pch=15,lwd=1, type="o", col = "blue") 
+
+
+train.x <- model.matrix(Cancel~.,data=cell_train)[,-1]
+knn.cat <- caret::train(x = train.x, y= cell_train$Cancel, method = "knn",
+                       trControl = train.control, preProcess = c("range"),
+                       metric="logLoss",
+                       tuneGrid = expand.grid(k = 1:25))
+
+print(paste("The best K value without categorical is:", knn.cv$bestTune, "with log-loss:", min(knn.cv$results$logLoss)))
+print(paste("The best K value with categorical is:", knn.cat$bestTune, "with log-loss:", min(knn.cat$results$logLoss)))
+
+```
+
+
+## GBM
+I intended to use a more expansive hypergrid but my computer could barely handle these, so I tried to choose a robust list of each that got as general as possible. I also ran a few iterations and used the parameters that were chosen. So if 1000 n.trees was chosen I would make the list (100,500,100) instead of (500,1000,2000). I also changed the distribution to Bernoulli to account for the boolean response variable, Cancel.
+```{r}
+set.seed(36497)
+#gbm  with caret. 4 differneet hyperparmaters
+# create hyperparameter grid
+hyper_grid <- expand.grid(
+  n.trees = c(100,500,1000),
+  shrinkage = c( 0.001, 0.01, 0.1),
+  interaction.depth=c(1, 5, 7),
+  n.minobsinnode = c(2,4,16)
+)
+
+
+gbm.cv_nocat <- caret::train(Cancel ~ .-Married-PaymentMethod-BasePlan-IntlPlan-Deal, data = cell_train,
+                      method="gbm",
+                      distribution="bernoulli", 
+                      verbose = FALSE,
+                      trControl = train.control,
+                      tuneGrid = hyper_grid ,
+                      metric="logLoss",
+                      maximize = FALSE)
+
+gbm.cv_cat <- caret::train(Cancel ~ ., data = cell_train,
+                      method="gbm",
+                      distribution="bernoulli", 
+                      verbose = FALSE,
+                      trControl = train.control,
+                      tuneGrid = hyper_grid,
+                      metric="logLoss",
+                      maximize = FALSE)
+
+##Best hyperparamters
+print(gbm.cv_cat$bestTune)
+#final validation error
+print(paste("GBM Best logloss no categorical:" ,min(gbm.cv_nocat$results$logLoss)))
+print(paste("GBM Best logloss with categorical:" ,min(gbm.cv_cat$results$logLoss)))
+
+```
+
+
+## Random Forest
+Using Random Forest with mtry values going to the maximum of the available variables. The mtry values were pretty iffy here and chaotic post 20 but in general was the best at 15 and 20. Everything between 15 and 25 became a roller coaster, which is very interesting. 
+```{r}
+mtry.vec = 1:(dim(cell_train)[2]-1) #full dimension of all variables
+mtry.vec_nocat = 1:(dim(cell_train)[2]-6) #all variables minus categoricals
+
+rf.cv <- caret::train(Cancel ~ ., data = cell_train,
+                      method = "rf",
+                      trControl = train.control,
+                      ntree=350,
+                      metric="logLoss",
+                      tuneGrid = expand.grid(.mtry=mtry.vec) )
+
+rf.cv_nocat <- caret::train(Cancel ~ .-Married-PaymentMethod-BasePlan-IntlPlan-Deal, data = cell_train,
+                      method = "rf",
+                      trControl = train.control,
+                      ntree=350,
+                      metric="logLoss",
+                      tuneGrid = expand.grid(.mtry=mtry.vec_nocat) )
+
+plot(rf.cv$results$mtry,rf.cv$results$logLoss,xlab="mtry",  ylab="RMSE",
+     cex=2,pch=15,lwd=1, type="o", col = "red") 
+
+print(paste("Best mtry without categoricals:",rf.cv_nocat$bestTune, "with logloss:",min(rf.cv_nocat$results$logLoss)))
+print(paste("Best mtry with categoricals:",rf.cv$bestTune, "with logloss:",min(rf.cv$results$logLoss)))
+
+```
+
+
+
+## Conclusions
+Once again Random Forest and GBM were the top 2 models based on logloss. It's a very similar conclusion to project 1, but unfortunately since this dataset was much larger my GBM model is less complex than the one from project 1. 
+
+In conclusion, GBM with all variables was the ideal model for predicting wheter someone would cancel or not based on all the variables provided in the dataset. Similarly to project 1, the Random Forest model was very close to beating out the GBM model. However, it was not as close as it was in project1. That being said,  I will now apply the final GBM model to the test data set and save the predictions to a .csv file.
+
+```{r}
+set.seed(13897)
+cell_train$Cancel <- relevel(cell_train$Cancel, ref = "No") #Set variable we dont want as No
+cell_train$Cancel  = unclass(cell_train$Cancel)-1 # set to 0/1 so bernoulli can predict probability
+
+gbm.final <- gbm::gbm(Cancel ~ . , data = cell_train,
+                      n.trees=gbm.cv_cat$bestTune[['n.trees']],
+                      interaction.depth=gbm.cv_cat$bestTune[['interaction.depth']],
+                      shrinkage=gbm.cv_cat$bestTune[['shrinkage']],
+                      n.minobsinnode=gbm.cv_cat$bestTune[['n.minobsinnode']],
+                      distribution = "bernoulli")
+
+pred.prob <- predict(gbm.final,cell_test,type = "response")
+pred.class <- ifelse(pred.prob > 0.5, "Yes","No") #above .5 threshold = yes and below = no. Using this threshold as it seemed to work well in class examples 
+
+pred.prob <- round(pred.prob, 3) #rounded to match format of predictions_template.csv
+
+pred.df <- data.frame(Probabilities = pred.prob, Label = pred.class) #To get variable names in csv file 
+
+# Save the data frame to a CSV file
+write.csv(pred.df, file = "predictions.csv", row.names = FALSE)
+```

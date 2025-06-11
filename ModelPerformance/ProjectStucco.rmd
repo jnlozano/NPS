@@ -1,0 +1,176 @@
+---
+title: "Stucco Project"
+author: "Jimmy Lozano"
+output: html_document
+theme: "cerulean"
+highlight: "tango"
+---
+
+## Introduction
+I will utilize KNN, GBM, and Random Forest models on Stucco dataset. I will compare the models based on the RMSE metric and choose the final model with the best metric. That final model will then be applied to the test dataset. 
+
+
+
+## Libraries and Data Collection
+```{r, message=FALSE, warning=FALSE}
+rm(list=ls()) 
+library(rstudioapi)
+setwd(dirname(rstudioapi::getSourceEditorContext()$path))
+
+library(MLmetrics)
+library(randomForest)
+library(caret)
+library(dplyr)
+library(gbm)
+library(xgboost)
+maindir = getwd()
+data.dir = "/data/"       #data directory
+
+stucco_train <- read.csv(paste(maindir,data.dir,"stucco.csv",sep=""), 
+                      stringsAsFactors = TRUE) # read in data
+
+stucco_test <- read.csv(paste(maindir,data.dir,"stucco_test.csv",sep=""), 
+                      stringsAsFactors = TRUE) # read in data
+```
+
+
+
+
+
+## TrainControl object for KNN
+Using slightly different parameters from class. Will utilize same train control object for consistency among each training model.
+```{r}
+set.seed(9279)
+
+num_folds = 7
+num_repeats = 5
+train.control <- caret::trainControl(
+  method = "repeatedcv", 
+  number = num_folds,
+  repeats = num_repeats,
+  savePredictions = TRUE,
+  index = createMultiFolds(stucco_train$strength, k=num_folds, times=num_repeats) ,
+  returnResamp = "all",
+)
+```
+
+## Without categorical variables first 
+Note: I tried a KNN tuneGrid of 45 first but noticed they all get increasingly worse post 10 so I made the threshold 10 to have a more informative plot. 
+```{r}
+## ----------------------------------------------------------------------------------------------------------------------------------
+#knn with caret. make sure to include preProces
+knn.cv <- caret::train(strength ~ .-method-mixing-region, data = stucco_train, method = "knn",
+                       trControl = train.control, preProcess = c("range"),
+                       tuneGrid = expand.grid(k = 1:10))
+
+plot(knn.cv$results$k,knn.cv$results$RMSE,xlab="k",  ylab="RMSE",
+     cex=2,pch=15,lwd=1, type="o", col = "blue") 
+
+print(paste("The best K value with categorical is:", knn.cv$bestTune, "with RMSE:", min(knn.cv$results$RMSE)))
+
+```
+## With Categorical
+```{r}
+
+#### Categorical
+train.x <- model.matrix(strength~.,data=stucco_train)[,-1]
+
+knn.cv_cat <- caret::train(x = train.x, y= stucco_train$strength, method = "knn",
+                           trControl = train.control, preProcess = c("range"),
+                           tuneGrid = expand.grid(k = 1:10))
+
+plot(knn.cv_cat$results$k,knn.cv_cat$results$RMSE,xlab="k",  ylab="RMSE",
+     cex=2,pch=15,lwd=1, type="o", col = "blue") 
+
+knn.cv_cat$bestTune
+
+print(paste("The best K value with categorical is:", knn.cv_cat$bestTune, "with RMSE:", min(knn.cv_cat$results$RMSE)))
+```
+
+## KNN Conclusion
+Since the RMSE without categorical variables is much better, I will conclude that a KNN model without categorical variables and a k parameter of 4 is the best model. But with RMSE values like this, it's pretty obvious that KNN is not a useful model for this data set. 
+
+
+##GBM
+```{r}
+set.seed(102765)
+#gbm  with caret. 4 differneet hyperparmaters
+# create hyperparameter grid
+hyper_grid <- expand.grid(
+  n.trees = c(100, 500, 1000, 1500, 2000),
+  shrinkage = c( .0001, 0.001, 0.01, 0.1),
+  interaction.depth=c(1, 3, 5),
+  n.minobsinnode = c(2, 8, 32)
+)
+
+
+gbm.cv_nocat <- caret::train(strength ~ .-method-mixing-region-age, data = stucco_train,
+                      method="gbm",
+                      distribution="gaussian", 
+                      verbose = FALSE,
+                      trControl = train.control,
+                      tuneGrid = hyper_grid )
+gbm.cv_cat <- caret::train(strength ~ ., data = stucco_train,
+                      method="gbm",
+                      distribution="gaussian", 
+                      verbose = FALSE,
+                      trControl = train.control,
+                      tuneGrid = hyper_grid )
+
+##Best hyperparamters
+print(gbm.cv_nocat$bestTune)
+#final validation error
+print(paste("GBM Best RMSE no categorical:" ,min(gbm.cv_nocat$results$RMSE)))
+print(paste("GBM Best RMSE with categorical:" ,min(gbm.cv_cat$results$RMSE)))
+
+```
+
+
+## Random Forest
+
+```{r}
+mtry.vec = 1:(dim(stucco_train)[2]-1)
+mtry.vec_nocat = 1:(dim(stucco_train)[2]-5)
+
+rf.cv <- caret::train(strength ~ ., data = stucco_train,
+                      method = "rf",
+                      trControl = train.control,
+                      ntree=350,
+                      tuneGrid = expand.grid(.mtry=mtry.vec) )
+
+rf.cv_nocat <- caret::train(strength ~ .-method-mixing-region-age, data = stucco_train,
+                      method = "rf",
+                      trControl = train.control,
+                      ntree=350,
+                      tuneGrid = expand.grid(.mtry=mtry.vec_nocat) )
+
+plot(rf.cv$results$mtry,rf.cv$results$RMSE,xlab="mtry",  ylab="RMSE",
+     cex=2,pch=15,lwd=1, type="o", col = "red") 
+
+print(paste("Best mtry without categoricals:",rf.cv_nocat$bestTune, "with RMSE:",min(rf.cv_nocat$results$RMSE)))
+print(paste("Best mtry with categoricals:",rf.cv$bestTune, "with RMSE:",min(rf.cv$results$RMSE)))
+
+```
+
+
+
+## Winner?
+I was struggling with choosing GBM since I knew it would be the more popular model as we discussed in class that it most often won Kaggle competitions. I did try different variables combinations such as just the additives, just the mixtures, or cement/ash/water, but they all gave RMSE values of 10+. The best combinations seemed to be between with and without categorical variables. Ultimately I decided to add more hyperparameters in order to best tune the model and give me something slightly more unique. 
+
+In conclusion, GBM with all variables was the ideal model for predicting the strength of stucco. Although it is worth noting that Random Forest had very similar RMSE values. I tried a few different seeds and sometimes saw the values become almost negligible. That being said,  I will now apply the final GBM model to the test data set and save the predictions to a .csv file.
+
+```{r}
+set.seed(6207)
+
+gbm.final <- gbm::gbm(strength ~ . , data = stucco_train,
+                      n.trees=gbm.cv_nocat$bestTune[['n.trees']],
+                      interaction.depth=gbm.cv_nocat$bestTune[['interaction.depth']],
+                      shrinkage=gbm.cv_nocat$bestTune[['shrinkage']],
+                      n.minobsinnode=gbm.cv_nocat$bestTune[['n.minobsinnode']],
+                      distribution = "gaussian")
+
+pred.strength <- predict(gbm.final,stucco_test)
+pred.df <- data.frame(strength = pred.strength) #To get variable name in csv file 
+# Save the data frame to a CSV file
+write.csv(pred.df, file = "predictions.csv", row.names = FALSE)
+```
